@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Procedural Map with Boids, Forests, Clouds & Height Layers</title>
+<style>
+  body, html {
+    margin: 0; padding: 0; overflow: hidden;
+    background: #222;
+  }
+  canvas {
+    display: block;
+    background: #222;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+
+<script>
+class PerlinNoise {
+  constructor() {
+    this.grad3 = [
+      [1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],
+      [1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],
+      [0,1,1],[0,-1,1],[0,1,-1],[0,-1,-1]
+    ];
+    this.p = [];
+    for(let i=0; i<256; i++) this.p[i] = Math.floor(Math.random()*256);
+    this.perm = [];
+    for(let i=0; i<512; i++) this.perm[i]=this.p[i & 255];
+  }
+  dot(g, x, y) {
+    return g[0]*x + g[1]*y;
+  }
+  fade(t) {
+    return t*t*t*(t*(t*6-15)+10);
+  }
+  lerp(a,b,t) {
+    return (1-t)*a + t*b;
+  }
+  noise(x, y) {
+    let X = Math.floor(x) & 255;
+    let Y = Math.floor(y) & 255;
+    let xf = x - Math.floor(x);
+    let yf = y - Math.floor(y);
+
+    let topRight = this.perm[this.perm[X+1] + Y+1];
+    let topLeft = this.perm[this.perm[X] + Y+1];
+    let bottomRight = this.perm[this.perm[X+1] + Y];
+    let bottomLeft = this.perm[this.perm[X] + Y];
+
+    let dotTopRight = this.dot(this.grad3[topRight % 12], xf-1, yf-1);
+    let dotTopLeft = this.dot(this.grad3[topLeft % 12], xf, yf-1);
+    let dotBottomRight = this.dot(this.grad3[bottomRight % 12], xf-1, yf);
+    let dotBottomLeft = this.dot(this.grad3[bottomLeft % 12], xf, yf);
+
+    let u = this.fade(xf);
+    let v = this.fade(yf);
+
+    let lerpBottom = this.lerp(dotBottomLeft, dotBottomRight, u);
+    let lerpTop = this.lerp(dotTopLeft, dotTopRight, u);
+    return this.lerp(lerpBottom, lerpTop, v);
+  }
+}
+
+
+class Boid {
+  constructor(x, y) {
+    this.position = {x, y};
+    this.velocity = {x: (Math.random()*2 -1)*2, y: (Math.random()*2 -1)*2};
+    this.acceleration = {x:0, y:0};
+    this.maxSpeed = 3;
+    this.maxForce = 0.05;
+    this.size = 12;
+  }
+  update() {
+    this.velocity.x += this.acceleration.x;
+    this.velocity.y += this.acceleration.y;
+
+    const speed = Math.sqrt(this.velocity.x**2 + this.velocity.y**2);
+    if(speed > this.maxSpeed) {
+      this.velocity.x = (this.velocity.x / speed) * this.maxSpeed;
+      this.velocity.y = (this.velocity.y / speed) * this.maxSpeed;
+    }
+
+    this.position.x += this.velocity.x;
+    this.position.y += this.velocity.y;
+
+    this.acceleration.x = 0;
+    this.acceleration.y = 0;
+  }
+  applyForce(force) {
+    this.acceleration.x += force.x;
+    this.acceleration.y += force.y;
+  }
+  seek(target) {
+    let desired = {x: target.x - this.position.x, y: target.y - this.position.y};
+    let d = Math.sqrt(desired.x**2 + desired.y**2);
+    if (d === 0) return {x: 0, y: 0};
+    desired.x /= d;
+    desired.y /= d;
+    desired.x *= this.maxSpeed;
+    desired.y *= this.maxSpeed;
+
+    let steer = {x: desired.x - this.velocity.x, y: desired.y - this.velocity.y};
+    let steerMag = Math.sqrt(steer.x**2 + steer.y**2);
+    if(steerMag > this.maxForce) {
+      steer.x = (steer.x / steerMag) * this.maxForce;
+      steer.y = (steer.y / steerMag) * this.maxForce;
+    }
+    return steer;
+  }
+  edges(width, height) {
+    if(this.position.x > width) this.position.x = 0;
+    if(this.position.x < 0) this.position.x = width;
+    if(this.position.y > height) this.position.y = 0;
+    if(this.position.y < 0) this.position.y = height;
+  }
+  draw(ctx) {
+    let angle = Math.atan2(this.velocity.y, this.velocity.x);
+    ctx.save();
+    ctx.translate(this.position.x, this.position.y);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(this.size, 0);
+    ctx.lineTo(-this.size*0.5, this.size*0.6);
+    ctx.lineTo(-this.size*0.5, -this.size*0.6);
+    ctx.closePath();
+    ctx.fillStyle = 'black';
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let width, height;
+function resize() {
+  width = window.innerWidth;
+  height = window.innerHeight;
+  canvas.width = width;
+  canvas.height = height;
+}
+resize();
+window.addEventListener('resize', resize);
+
+
+const noise = new PerlinNoise();
+const forestNoise = new PerlinNoise();
+const cloudNoise = new PerlinNoise();
+
+const tileSize = 8;
+const noiseScale = 0.004 * (20 / tileSize);
+const forestNoiseScale = 0.005 * (20 / tileSize);
+const cloudNoiseScale = 0.008;
+
+let offsetX = 0;
+let offsetY = 0;
+let cloudOffsetX = 0;
+let cloudOffsetY = 0;
+
+const boids = [];
+const NUM_BOIDS = 40;
+for(let i=0; i<NUM_BOIDS; i++) {
+  boids.push(new Boid(Math.random()*width, Math.random()*height));
+}
+
+const mouse = {x: width/2, y: height/2};
+let mouseMoved = false;
+window.addEventListener('mousemove', (e) => {
+  mouse.x = e.clientX;
+  mouse.y = e.clientY;
+  mouseMoved = true;
+});
+
+
+function drawMap() {
+  const widthTiles = Math.ceil(width / tileSize) + 2;
+  const heightTiles = Math.ceil(height / tileSize) + 2;
+
+  for(let y=0; y < heightTiles; y++) {
+    for(let x=0; x < widthTiles; x++) {
+      const px = x * tileSize + offsetX;
+      const py = y * tileSize + offsetY;
+      const n = noise.noise(px * noiseScale, py * noiseScale) * 0.5 + 0.5;
+      const f = forestNoise.noise(px * forestNoiseScale, py * forestNoiseScale) * 0.5 + 0.5;
+
+      let color;
+      if (n < 0.30) {
+        const blue = Math.floor(60 + n * 155); 
+        color = `rgb(0,0,${blue})`;
+      } else if (n < 0.35) {
+        color = '#c2b280'; // sand
+      } else if (n < 0.45) {
+        color = '#8ca65b'; // light green grass
+      } else if (n < 0.55) {
+        color = '#557847'; // darker grass
+      } else if (n < 0.65) {
+        color = '#3f632f'; // hill green
+      } else if (n < 0.75) {
+        color = '#AD5D4E'; // rocky grass
+      } else {
+        color = '#ffffff'; // rock
+      }
+
+
+      ctx.fillStyle = color;
+      ctx.fillRect(x * tileSize, y * tileSize, tileSize, tileSize);
+    }
+  }
+}
+
+//clouds
+function drawClouds() {
+  const widthTiles = Math.ceil(width / tileSize) + 2;
+  const heightTiles = Math.ceil(height / tileSize) + 2;
+
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+  for(let y=0; y < heightTiles; y++) {
+    for(let x=0; x < widthTiles; x++) {
+      const sampleX = (x * tileSize + cloudOffsetX) * cloudNoiseScale;
+      const sampleY = (y * tileSize + cloudOffsetY) * cloudNoiseScale;
+      const c = cloudNoise.noise(sampleX, sampleY) * 0.55 + 0.55;
+      if(c > 0.65) {
+        ctx.fillRect(x * tileSize, y * tileSize, tileSize, tileSize);
+      }
+    }
+  }
+}
+
+
+function animate() {
+  ctx.clearRect(0, 0, width, height);
+
+  if(mouseMoved) {
+    const centerX = width/2;
+    const centerY = height/2;
+    const scrollSpeed = 0.03;
+    const deltaX = (mouse.x - centerX) * scrollSpeed;
+    const deltaY = (mouse.y - centerY) * scrollSpeed;
+    offsetX += deltaX;
+    offsetY += deltaY;
+
+    for(let boid of boids) {
+      const desiredForce = boid.seek(mouse);
+      boid.applyForce(desiredForce);
+      boid.update();
+      boid.edges(width, height);
+    }
+  }
+
+  cloudOffsetX += 0.3;
+  cloudOffsetY += 0.1;
+
+  drawMap();
+  drawClouds();
+  for(let boid of boids) {
+    boid.draw(ctx);
+  }
+
+  mouseMoved = false;
+  requestAnimationFrame(animate);
+}
+
+animate();
+</script>
+</body>
+</html>
